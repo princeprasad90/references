@@ -1,0 +1,107 @@
+using System;
+using Confluent.Kafka;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        var config = new ConsumerConfig
+        {
+            BootstrapServers = "your-bootstrap-servers",
+            GroupId = "your-group-id",
+            AutoOffsetReset = AutoOffsetReset.Earliest,
+            EnableAutoCommit = false // Disable auto-commit
+        };
+
+        using (var consumer = new ConsumerBuilder<Ignore, string>(config).Build())
+        {
+            consumer.Subscribe("your-topic");
+            consumer.Subscribe("retry-topic");
+
+            try
+            {
+                while (true)
+                {
+                    var consumeResult = consumer.Consume();
+
+                    try
+                    {
+                        // Process the message
+                        Console.WriteLine($"Consumed message: {consumeResult.Message.Value}");
+                        
+                        // Simulate processing time
+                        System.Threading.Thread.Sleep(TimeSpan.FromSeconds(5));
+
+                        // If processing succeeds, commit the offset
+                        consumer.Commit(consumeResult);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Handle transient errors
+                        Console.WriteLine($"Error processing message: {ex.Message}");
+
+                        // Check if the maximum number of retry attempts is reached
+                        if (consumeResult.Headers.TryGetLastBytes("retry-count", out byte[] retryCountBytes))
+                        {
+                            int retryCount = BitConverter.ToInt32(retryCountBytes, 0);
+                            if (retryCount >= 3) // Example: Maximum of 3 retry attempts
+                            {
+                                // Commit the offset in the retry queue before moving to DLQ
+                                consumer.Commit(consumeResult);
+
+                                // Publish the message to the DLQ
+                                PublishToDLQ(consumeResult.Message.Value);
+
+                                continue; // Skip retry attempts
+                            }
+                        }
+
+                        // Increment the retry count and publish the message to the retry queue
+                        IncrementRetryCountAndPublishToRetryQueue(consumeResult.Message);
+                    }
+                }
+            }
+            catch (ConsumeException e)
+            {
+                Console.WriteLine($"Error occurred: {e.Error.Reason}");
+            }
+            finally
+            {
+                consumer.Close();
+            }
+        }
+    }
+
+    static void PublishToRetryQueue(string message)
+    {
+        // Code to publish message to the retry queue
+    }
+
+    static void PublishToDLQ(string message)
+    {
+        // Code to publish message to the DLQ
+    }
+
+    static void IncrementRetryCountAndPublishToRetryQueue(Message<string> message)
+    {
+        var retryCount = 0;
+        if (message.Headers.TryGetLastBytes("retry-count", out byte[] retryCountBytes))
+        {
+            retryCount = BitConverter.ToInt32(retryCountBytes, 0);
+        }
+        retryCount++;
+
+        var newMessage = new Message<string>
+        {
+            Key = message.Key,
+            Value = message.Value,
+            Headers = new Headers
+            {
+                { "retry-count", BitConverter.GetBytes(retryCount) }
+            }
+        };
+
+        // Publish the message to the retry queue
+        PublishToRetryQueue(newMessage);
+    }
+}
